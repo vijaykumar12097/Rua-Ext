@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 import RPi.GPIO as GPIO
 import time
+import random
 import threading
 
 app = Flask(__name__)
@@ -45,24 +46,6 @@ for pin in ZONE_PINS.values():
 # ------------------------------
 VIRTUAL_ZONE_GROUPS = {
 
-    # "crowd_corridors_all": [
-    #     "crowd_corridor_1",
-    #     "crowd_corridor_2",
-    #     "crowd_corridor_3",
-    #     "crowd_corridor_4",
-    #     "crowd_corridor_5"
-    # ],
-
-    # "roadnames_surroundings": [
-    #     "king_abdulaziz_road",
-    #     "haram_boulevard",
-    #     "al_amidah_road",
-    #     "prince_mohammed_bin_salman_road",
-    #     "salman_bin_abdulaziz_road",
-    #     "substation_and_utilities",
-    #     "masjid_al_haram",
-    #     "district_cooling_plant_1"
-    # ]
     
      "crowd_corridors_all": [
         "crowd_corridor_1",
@@ -92,21 +75,13 @@ VIRTUAL_ZONE_GROUPS = {
 # Idle / Random Mode Config
 # ------------------------------
 last_activity_time = time.time()
-IDLE_TIMEOUT = 120  # 2 minutes
+IDLE_TIMEOUT = 3600  # 1 hour
 RANDOM_MODE = False
+MANUAL_STANDBY = False
 
 # ------------------------------
 # Helpers
 # ------------------------------
-# def resolve_zones(zones):
-#     resolved = set()
-#     for zone in zones:
-#         if zone in VIRTUAL_ZONE_GROUPS:
-#             resolved.update(VIRTUAL_ZONE_GROUPS[zone])
-#         else:
-#             resolved.add(zone)
-#     return list(resolved)
-
 
 def resolve_zones(zones):
     resolved = set()
@@ -148,14 +123,28 @@ def random_mode_worker():
 
     while True:
         time.sleep(2)
+
         idle_time = time.time() - last_activity_time
 
         if idle_time > IDLE_TIMEOUT:
             RANDOM_MODE = True
 
         if RANDOM_MODE:
-            print("[RANDOM MODE] Activating ALL zones")
-            for zone in ZONE_PINS:
+
+            available_zones = list(ZONE_PINS.keys())
+
+            num_zones = random.randint(1, len(available_zones))
+
+            selected_zones = random.sample(
+                available_zones,
+                num_zones
+            )
+
+            print(f"[RANDOM MODE] {selected_zones}")
+
+            turn_off_all()
+
+            for zone in selected_zones:
                 set_zone(zone, True)
             time.sleep(10)  # small delay to prevent tight loop
 
@@ -166,20 +155,32 @@ threading.Thread(target=random_mode_worker, daemon=True).start()
 # Activity Tracker
 # ------------------------------
 def update_activity():
-    global last_activity_time, RANDOM_MODE
+    global last_activity_time, RANDOM_MODE, MANUAL_STANDBY
+
     last_activity_time = time.time()
-    RANDOM_MODE = False
+
+    if not MANUAL_STANDBY:
+        RANDOM_MODE = False
 
 # ------------------------------
 # API Endpoints
 # ------------------------------
 @app.route('/status', methods=['GET'])
 def get_status():
-    update_activity()
+
     status = {
         zone: "ON" if GPIO.input(pin) == GPIO.LOW else "OFF"
         for zone, pin in ZONE_PINS.items()
     }
+
+    status["master"] = (
+        "ON"
+        if all(GPIO.input(pin) == GPIO.LOW for pin in ZONE_PINS.values())
+        else "OFF"
+    )
+
+    status["stand_by_mode"] = "ON" if RANDOM_MODE else "OFF"
+
     return jsonify(status)
 
 @app.route("/on_zone/<zone>", methods=["POST"])
@@ -198,16 +199,51 @@ def off_zone(zone):
 
 @app.route("/on_all", methods=["POST"])
 def on_all():
+    global RANDOM_MODE, MANUAL_STANDBY
+
     update_activity()
+
+    RANDOM_MODE = False
+    MANUAL_STANDBY = False
+
     for zone in ZONE_PINS:
         set_zone(zone, True)
-    return jsonify({"status": "all on"})
+
+    return jsonify({"status": "all_on"})
 
 @app.route("/off_all", methods=["POST"])
 def off_all():
+    global RANDOM_MODE, MANUAL_STANDBY
+
     update_activity()
+
+    RANDOM_MODE = False
+    MANUAL_STANDBY = False
+
     turn_off_all()
-    return jsonify({"status": "all off"})
+
+    return jsonify({"status": "all_off"})
+
+@app.route("/enable_standby", methods=["POST"])
+def enable_standby():
+    global RANDOM_MODE, MANUAL_STANDBY
+
+    MANUAL_STANDBY = True
+    RANDOM_MODE = True
+
+    return jsonify({"status": "standby_on"})
+
+
+@app.route("/disable_standby", methods=["POST"])
+def disable_standby():
+    global RANDOM_MODE, MANUAL_STANDBY
+
+    MANUAL_STANDBY = False
+    RANDOM_MODE = False
+
+    turn_off_all()
+
+    return jsonify({"status": "standby_off"})
 
 # ------------------------------
 # UI Routes
